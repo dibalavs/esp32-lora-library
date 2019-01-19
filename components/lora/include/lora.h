@@ -16,10 +16,12 @@ extern "C" {
 
 #define LORA_ESP32_PARAM_DEFAULT {\
 HSPI_HOST, \
-ESP32_HAL_UNDEFINED, \
-ESP32_HAL_UNDEFINED, \
-ESP32_HAL_UNDEFINED, \
-ESP32_HAL_UNDEFINED, \
+(gpio_num_t)ESP32_HAL_UNDEFINED, \
+(gpio_num_t)ESP32_HAL_UNDEFINED, \
+(gpio_num_t)ESP32_HAL_UNDEFINED, \
+(gpio_num_t)ESP32_HAL_UNDEFINED, \
+(gpio_num_t)ESP32_HAL_UNDEFINED, \
+false, \
 false, \
 true, \
 E_LORA_POWER_LEVEL_MIN, \
@@ -28,10 +30,12 @@ E_LORA_POWER_LEVEL_MIN, \
 
 #define LORA_ESP32_PARAM_USING_SYSTEM_SPI {\
 HSPI_HOST, \
-ESP32_HAL_UNDEFINED, \
-ESP32_HAL_UNDEFINED, \
-ESP32_HAL_UNDEFINED, \
-ESP32_HAL_UNDEFINED, \
+(gpio_num_t)ESP32_HAL_UNDEFINED, \
+(gpio_num_t)ESP32_HAL_UNDEFINED, \
+(gpio_num_t)ESP32_HAL_UNDEFINED, \
+(gpio_num_t)ESP32_HAL_UNDEFINED, \
+(gpio_num_t)ESP32_HAL_UNDEFINED, \
+true, \
 false, \
 true, \
 E_LORA_POWER_LEVEL_MIN, \
@@ -39,6 +43,7 @@ E_LORA_POWER_LEVEL_MIN, \
 };
 
 typedef enum {
+    E_LORA_POWER_LEVEL_MIN = 0,
     E_LORA_POWER_LEVEL_0 = 0,
     E_LORA_POWER_LEVEL_1,
     E_LORA_POWER_LEVEL_2,
@@ -91,13 +96,11 @@ typedef enum {
 
 typedef struct {
     spi_host_device_t spi_host_device;
-    spi_device_handle_t spi_device_handle;
     gpio_num_t cs;
     gpio_num_t miso;
     gpio_num_t mosi;
     gpio_num_t sck;
     gpio_num_t rst;
-    int spi_dma_chan;
     bool using_preconfigured_spi_bus;
     bool using_preconfigured_spi_device;
     bool crc_enabled;

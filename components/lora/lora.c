@@ -10,7 +10,7 @@
 #include "lora.h"
 
 
-
+static spi_device_handle_t spi_device_handle;
 static lora_esp32_param_t esp32_param;
 static const char* TAG = "lora-esp32";
 
@@ -90,7 +90,7 @@ void lora_write_reg(lora_esp32_register reg, uint8_t val) {
     };
 
     gpio_set_level(esp32_param.cs, 0);
-    spi_device_transmit(esp32_param.spi_device_handle, &t);
+    spi_device_transmit(spi_device_handle, &t);
     gpio_set_level(esp32_param.cs, 1);
 }
 
@@ -111,7 +111,7 @@ uint8_t lora_read_reg(lora_esp32_register reg) {
     };
 
     gpio_set_level(esp32_param.cs, 0);
-    spi_device_transmit(esp32_param.spi_device_handle, &t);
+    spi_device_transmit(spi_device_handle, &t);
     gpio_set_level(esp32_param.cs, 1);
     return in[1];
 }
@@ -221,7 +221,7 @@ void lora_set_bandwidth(lora_esp32_bandwidth sbw) {
 }
 
 /**
- * Set coding rate 
+ * Set coding rate
  * @param denominator 5-8, Denominator for the coding rate 4/x
  */
 void lora_set_coding_rate(lora_esp32_coding_rate denominator) {
@@ -267,14 +267,6 @@ esp_err_t lora_init(lora_esp32_param_t params) {
     esp32_param = params;
     esp_err_t ret;
 
-    /*
-     * Configure CPU hardware to communicate with the radio chip
-     */
-    gpio_pad_select_gpio(esp32_param.rst);
-    gpio_set_direction(esp32_param.rst, GPIO_MODE_OUTPUT);
-    gpio_pad_select_gpio(esp32_param.cs);
-    gpio_set_direction(esp32_param.cs, GPIO_MODE_OUTPUT);
-
     if(esp32_param.cs == ESP32_HAL_UNDEFINED) {
         ESP_LOGE(TAG, "CS PIN is NOT configured");
         return ESP_ERR_INVALID_ARG;
@@ -282,11 +274,12 @@ esp_err_t lora_init(lora_esp32_param_t params) {
 
     if(esp32_param.rst == ESP32_HAL_UNDEFINED) {
         ESP_LOGW(TAG, "RESET pin is not configured. reset function is disabled");
+        return ESP_ERR_INVALID_ARG;
     }
 
     if(!esp32_param.using_preconfigured_spi_bus) {
-        if (esp32_param.sck == ESP32_HAL_UNDEFINED &&
-            esp32_param.mosi == ESP32_HAL_UNDEFINED &&
+        if (esp32_param.sck == ESP32_HAL_UNDEFINED ||
+            esp32_param.mosi == ESP32_HAL_UNDEFINED ||
             esp32_param.miso == ESP32_HAL_UNDEFINED) {
             ESP_LOGE(TAG, "SPI PIN is NOT configured");
             return ESP_ERR_INVALID_ARG;
@@ -314,11 +307,19 @@ esp_err_t lora_init(lora_esp32_param_t params) {
                 .flags = 0,
                 .pre_cb = NULL
         };
-        if ((ret = spi_bus_add_device(esp32_param.spi_host_device, &dev, &esp32_param.spi_device_handle)) != ESP_OK) {
+        if ((ret = spi_bus_add_device(esp32_param.spi_host_device, &dev, &spi_device_handle)) != ESP_OK) {
             ESP_LOGE(TAG, "spi_bus_add_device failed: %s(0x%04X)", esp_err_to_name(ret), ret);
             return ret;
         }
     }
+
+    /*
+     * Configure CPU hardware to communicate with the radio chip
+     */
+    gpio_pad_select_gpio(esp32_param.rst);
+    gpio_set_direction(esp32_param.rst, GPIO_MODE_OUTPUT);
+    gpio_pad_select_gpio(esp32_param.cs);
+    gpio_set_direction(esp32_param.cs, GPIO_MODE_OUTPUT);
 
     /*
      * Perform hardware reset.
