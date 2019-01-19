@@ -1,14 +1,12 @@
 #ifndef __LORA_H__
 #define __LORA_H__
 
-#include "freertos/queue.h"
 #include "driver/spi_master.h"
 #include "driver/gpio.h"
 
 #if defined(__cplusplus)
 extern "C" {
 #endif
-
 
 #ifndef ESP32_HAL_UNDEFINED
 #define ESP32_HAL_UNDEFINED (-1)
@@ -27,6 +25,7 @@ true, \
 E_LORA_POWER_LEVEL_MIN, \
 1024 \
 };
+
 #define LORA_ESP32_PARAM_USING_SYSTEM_SPI {\
 HSPI_HOST, \
 ESP32_HAL_UNDEFINED, \
@@ -38,7 +37,6 @@ true, \
 E_LORA_POWER_LEVEL_MIN, \
 1024 \
 };
-
 
 typedef enum {
     E_LORA_POWER_LEVEL_0 = 0,
@@ -105,9 +103,7 @@ typedef struct {
     bool crc_enabled;
     lora_esp32_power_level tx_power;
     size_t rx_buffer_size;
-    QueueHandle_t rx_queue;
 } lora_esp32_param_t;
-
 
 esp_err_t lora_init(lora_esp32_param_t params);
 void lora_reset();
@@ -133,11 +129,9 @@ double lora_packet_snr();
 void lora_close();
 int lora_initialized();
 void lora_dump_registers();
-esp_err_t lora_start_rx_task();
-
 
 #if defined(__cplusplus)
 }
 #endif
 
-#endif
+#endif // __LORA_H__
