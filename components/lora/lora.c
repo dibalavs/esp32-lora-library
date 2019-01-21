@@ -78,7 +78,8 @@ static long __frequency;
  * @param reg Register index.
  * @param val Value to write.
  */
-void lora_write_reg(lora_esp32_register reg, uint8_t val) {
+static
+esp_err_t lora_write_reg(lora_esp32_register reg, uint8_t val) {
     uint8_t out[2] = { (uint8_t)(0x80 | reg), val };
     uint8_t in[2];
 
@@ -90,16 +91,19 @@ void lora_write_reg(lora_esp32_register reg, uint8_t val) {
     };
 
     gpio_set_level(esp32_param.cs, 0);
-    spi_device_transmit(spi_device_handle, &t);
+    esp_err_t res = spi_device_transmit(spi_device_handle, &t);
     gpio_set_level(esp32_param.cs, 1);
+    return res;
 }
 
 /**
  * Read the current value of a register.
  * @param reg Register index.
- * @return Value of the register.
+ * @param val[out] Value of the register.
+ * @return return code.
  */
-uint8_t lora_read_reg(lora_esp32_register reg) {
+static
+esp_err_t lora_read_reg(lora_esp32_register reg, uint8_t *val) {
     uint8_t out[2] = { reg, 0xff };
     uint8_t in[2];
 
@@ -111,9 +115,10 @@ uint8_t lora_read_reg(lora_esp32_register reg) {
     };
 
     gpio_set_level(esp32_param.cs, 0);
-    spi_device_transmit(spi_device_handle, &t);
+    esp_err_t res = spi_device_transmit(spi_device_handle, &t);
     gpio_set_level(esp32_param.cs, 1);
-    return in[1];
+    *val = in[1];
+    return res;
 }
 
 /**
@@ -132,9 +137,11 @@ void lora_reset(void) {
  * Configure explicit header mode.
  * Packet size will be included in the frame.
  */
-void lora_explicit_header_mode(void) {
+esp_err_t lora_explicit_header_mode(void) {
     __implicit = 0;
-    lora_write_reg(E_LORA_REG_MODEM_CONFIG_1, lora_read_reg(E_LORA_REG_MODEM_CONFIG_1) & (uint8_t)(0xfe));
+    uint8_t val;
+    esp_err_t res = lora_read_reg(E_LORA_REG_MODEM_CONFIG_1, &val);
+    return res ? res : lora_write_reg(E_LORA_REG_MODEM_CONFIG_1, val & (uint8_t)(0xfe));
 }
 
 /**
@@ -142,122 +149,139 @@ void lora_explicit_header_mode(void) {
  * All packets will have a predefined size.
  * @param size Size of the packets.
  */
-void lora_implicit_header_mode(uint8_t size) {
+esp_err_t lora_implicit_header_mode(uint8_t size) {
     __implicit = 1;
-    lora_write_reg(E_LORA_REG_MODEM_CONFIG_1, lora_read_reg(E_LORA_REG_MODEM_CONFIG_1) | (uint8_t)(0x01));
-    lora_write_reg(E_LORA_REG_PAYLOAD_LENGTH, (uint8_t)(size));
+    uint8_t val;
+    esp_err_t res = lora_read_reg(E_LORA_REG_MODEM_CONFIG_1, &val);
+    res = res ?: lora_write_reg(E_LORA_REG_MODEM_CONFIG_1, val | (uint8_t)(0x01));
+    return res ? res : lora_write_reg(E_LORA_REG_PAYLOAD_LENGTH, (uint8_t)(size));
 }
 
 /**
  * Sets the radio transceiver in idle mode.
  * Must be used to change registers and access the FIFO.
  */
-void lora_idle(void) {
-    lora_write_reg(E_LORA_REG_OP_MODE, E_LORA_MODE_LONG_RANGE_MODE | E_LORA_MODE_STDBY);
+esp_err_t lora_idle(void) {
+    return lora_write_reg(E_LORA_REG_OP_MODE, E_LORA_MODE_LONG_RANGE_MODE | E_LORA_MODE_STDBY);
 }
 
 /**
  * Sets the radio transceiver in sleep mode.
  * Low power consumption and FIFO is lost.
  */
-void lora_sleep(void) {
-    lora_write_reg(E_LORA_REG_OP_MODE, E_LORA_MODE_LONG_RANGE_MODE | E_LORA_MODE_SLEEP);
+esp_err_t lora_sleep(void) {
+    return lora_write_reg(E_LORA_REG_OP_MODE, E_LORA_MODE_LONG_RANGE_MODE | E_LORA_MODE_SLEEP);
 }
 
 /**
  * Sets the radio transceiver in receive mode.
  * Incoming packets will be received.
  */
-void lora_receive(void) {
-    lora_write_reg(E_LORA_REG_OP_MODE, E_LORA_MODE_LONG_RANGE_MODE | E_LORA_MODE_RX_CONTINUOUS);
+esp_err_t lora_receive(void) {
+    return lora_write_reg(E_LORA_REG_OP_MODE, E_LORA_MODE_LONG_RANGE_MODE | E_LORA_MODE_RX_CONTINUOUS);
 }
 
 /**
  * Configure power level for transmission
- * @param level 2-17, from least to most power
+ * @param level 0-15, from least to most power
  */
-void lora_set_tx_power(lora_esp32_power_level level) {
+esp_err_t lora_set_tx_power(lora_esp32_power_level level, bool use_boost) {
     // RF9x module uses PA_BOOST pin
-    lora_write_reg(E_LORA_REG_PA_CONFIG, (uint8_t)(PA_BOOST | level));
+    const uint8_t boost = use_boost ? PA_BOOST : 0;
+    return lora_write_reg(E_LORA_REG_PA_CONFIG, (uint8_t)(boost | level));
 }
 
 /**
  * Set carrier frequency.
  * @param frequency Frequency in Hz
  */
-void lora_set_frequency(long frequency) {
+esp_err_t lora_set_frequency(long frequency) {
     __frequency = frequency;
 
     uint64_t frf = ((uint64_t)frequency << 19) / 32000000;
+    esp_err_t res;
+    res = lora_write_reg(E_LORA_REG_FRF_MSB, (uint8_t)(frf >> 16));
+    res = res ?: lora_write_reg(E_LORA_REG_FRF_MID, (uint8_t)(frf >> 8));
+    res = res ?: lora_write_reg(E_LORA_REG_FRF_LSB, (uint8_t)(frf >> 0));
 
-    lora_write_reg(E_LORA_REG_FRF_MSB, (uint8_t)(frf >> 16));
-    lora_write_reg(E_LORA_REG_FRF_MID, (uint8_t)(frf >> 8));
-    lora_write_reg(E_LORA_REG_FRF_LSB, (uint8_t)(frf >> 0));
+    return res;
 }
 
 /**
  * Set spreading factor.
  * @param sf 6-12, Spreading factor to use.
  */
-void lora_set_spreading_factor(lora_esp32_spreading_factor sf) {
+esp_err_t lora_set_spreading_factor(lora_esp32_spreading_factor sf) {
     if (sf < 6) sf = 6;
     else if (sf > 12) sf = 12;
+    esp_err_t res;
 
     if (sf == E_LORA_SPREADING_FACTOR_MIN) {
-        lora_write_reg(E_LORA_REG_DETECTION_OPTIMIZE, 0xc5);
-        lora_write_reg(E_LORA_REG_DETECTION_THRESHOLD, 0x0c);
+        res = lora_write_reg(E_LORA_REG_DETECTION_OPTIMIZE, 0xc5);
+        res = res ?: lora_write_reg(E_LORA_REG_DETECTION_THRESHOLD, 0x0c);
     } else {
-        lora_write_reg(E_LORA_REG_DETECTION_OPTIMIZE, 0xc3);
-        lora_write_reg(E_LORA_REG_DETECTION_THRESHOLD, 0x0a);
+        res = lora_write_reg(E_LORA_REG_DETECTION_OPTIMIZE, 0xc3);
+        res = res ?: lora_write_reg(E_LORA_REG_DETECTION_THRESHOLD, 0x0a);
     }
 
-    lora_write_reg(E_LORA_REG_MODEM_CONFIG_2, (lora_read_reg(E_LORA_REG_MODEM_CONFIG_2) & (uint8_t)0x0f) | (uint8_t)((sf << 4) & 0xf0));
+    uint8_t val;
+    res = res ?: lora_read_reg(E_LORA_REG_MODEM_CONFIG_2, &val);
+    return res ? res : lora_write_reg(E_LORA_REG_MODEM_CONFIG_2,
+                                     (val & (uint8_t)0x0f) | (uint8_t)((sf << 4) & 0xf0));
 }
 
 /**
  * Set bandwidth (bit rate)   * @param sbw Bandwidth in Hz (up to 500000)   */
-void lora_set_bandwidth(lora_esp32_bandwidth sbw) {
-    lora_write_reg(E_LORA_REG_MODEM_CONFIG_1, (lora_read_reg(E_LORA_REG_MODEM_CONFIG_1) & 0x0f) | (sbw << 4));
+esp_err_t lora_set_bandwidth(lora_esp32_bandwidth sbw) {
+    uint8_t val;
+    esp_err_t res = lora_read_reg(E_LORA_REG_MODEM_CONFIG_1, &val);
+    return res ? res : lora_write_reg(E_LORA_REG_MODEM_CONFIG_1, (val & 0x0f) | (sbw << 4));
 }
 
 /**
  * Set coding rate
  * @param denominator 5-8, Denominator for the coding rate 4/x
  */
-void lora_set_coding_rate(lora_esp32_coding_rate denominator) {
+esp_err_t lora_set_coding_rate(lora_esp32_coding_rate denominator) {
     int cr = denominator - 4;
-    lora_write_reg(E_LORA_REG_MODEM_CONFIG_1, (lora_read_reg(E_LORA_REG_MODEM_CONFIG_1) & 0xf1) | (cr << 1));
+    uint8_t val;
+    esp_err_t res = lora_read_reg(E_LORA_REG_MODEM_CONFIG_1, &val);
+    return res ? res : lora_write_reg(E_LORA_REG_MODEM_CONFIG_1, (val & 0xf1) | (cr << 1));
 }
 
 /**
  * Set the size of preamble.
  * @param length Preamble length in symbols.
  */
-void lora_set_preamble_length(long length) {
-    lora_write_reg(E_LORA_REG_PREAMBLE_MSB, (uint8_t)(length >> 8));
-    lora_write_reg(E_LORA_REG_PREAMBLE_LSB, (uint8_t)(length >> 0));
+esp_err_t lora_set_preamble_length(long length) {
+    esp_err_t res = lora_write_reg(E_LORA_REG_PREAMBLE_MSB, (uint8_t)(length >> 8));
+    return res ? res : lora_write_reg(E_LORA_REG_PREAMBLE_LSB, (uint8_t)(length >> 0));
 }
 
 /**
  * Change radio sync word.
  * @param sw New sync word to use.
  */
-void lora_set_sync_word(int sw) {
-    lora_write_reg(E_LORA_REG_SYNC_WORD, sw);
+esp_err_t lora_set_sync_word(int sw) {
+    return lora_write_reg(E_LORA_REG_SYNC_WORD, sw);
 }
 
 /**
  * Enable appending/verifying packet CRC.
  */
-void lora_enable_crc(void) {
-    lora_write_reg(E_LORA_REG_MODEM_CONFIG_2, lora_read_reg(E_LORA_REG_MODEM_CONFIG_2) | 0x04);
+esp_err_t lora_enable_crc(void) {
+    uint8_t val;
+    esp_err_t res = lora_read_reg(E_LORA_REG_MODEM_CONFIG_2, &val);
+    return res ? res : lora_write_reg(E_LORA_REG_MODEM_CONFIG_2, val | 0x04);
 }
 
 /**
  * Disable appending/verifying packet CRC.
  */
-void lora_disable_crc(void) {
-    lora_write_reg(E_LORA_REG_MODEM_CONFIG_2, lora_read_reg(E_LORA_REG_MODEM_CONFIG_2) & 0xfb);
+esp_err_t lora_disable_crc(void) {
+    uint8_t val;
+    esp_err_t res = lora_read_reg(E_LORA_REG_MODEM_CONFIG_2, &val);
+    return res ? res : lora_write_reg(E_LORA_REG_MODEM_CONFIG_2, val & 0xfb);
 }
 
 /**
@@ -265,7 +289,7 @@ void lora_disable_crc(void) {
  */
 esp_err_t lora_init(lora_esp32_param_t params) {
     esp32_param = params;
-    esp_err_t ret;
+    esp_err_t ret = ESP_OK;
 
     if(esp32_param.cs == ESP32_HAL_UNDEFINED) {
         ESP_LOGE(TAG, "CS PIN is NOT configured");
@@ -332,7 +356,11 @@ esp_err_t lora_init(lora_esp32_param_t params) {
     uint8_t version;
     uint8_t i = 0;
     while(i++ < TIMEOUT_RESET) {
-        version = lora_read_reg(E_LORA_REG_VERSION);
+        ret = lora_read_reg(E_LORA_REG_VERSION, &version);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "FAILED TO READ VERSION: %d", ret);
+            break;
+        }
         if(version == 0x12) break;
         vTaskDelay(2);
     }
@@ -345,15 +373,17 @@ esp_err_t lora_init(lora_esp32_param_t params) {
     /*
      * Default configuration.
      */
-    lora_sleep();
-    lora_write_reg(E_LORA_REG_FIFO_RX_BASE_ADDR, 0);
-    lora_write_reg(E_LORA_REG_FIFO_TX_BASE_ADDR, 0);
-    lora_write_reg(E_LORA_REG_LNA, lora_read_reg(E_LORA_REG_LNA) | (uint8_t)0x03);
-    lora_write_reg(E_LORA_REG_MODEM_CONFIG_3, 0x04);
-    lora_set_tx_power(17);
+    ret = ret ?: lora_sleep();
+    ret = ret ?: lora_write_reg(E_LORA_REG_FIFO_RX_BASE_ADDR, 0);
+    ret = ret ?: lora_write_reg(E_LORA_REG_FIFO_TX_BASE_ADDR, 0);
+    uint8_t val;
+    ret = ret ?: lora_read_reg(E_LORA_REG_LNA, &val);
+    ret = ret ?: lora_write_reg(E_LORA_REG_LNA, val | (uint8_t)0x03);
+    ret = ret ?: lora_write_reg(E_LORA_REG_MODEM_CONFIG_3, 0x04);
+    ret = ret ?: lora_set_tx_power(params.tx_power, false);
 
-    lora_idle();
-    return ESP_OK;
+    ret = ret ?: lora_idle();
+    return ret;
 }
 
 /**
@@ -361,87 +391,117 @@ esp_err_t lora_init(lora_esp32_param_t params) {
  * @param buf Data to be sent
  * @param size Size of data.
  */
-void lora_send_packet(uint8_t *buf, int size) {
+esp_err_t lora_send_packet(const void *buf, unsigned size) {
     /*
      * Transfer data to radio.
      */
-    lora_idle();
-    lora_write_reg(E_LORA_REG_FIFO_ADDR_PTR, 0);
+    const uint8_t *buf_ptr = buf;
+    esp_err_t res = lora_idle();
+    res = res ?: lora_write_reg(E_LORA_REG_FIFO_ADDR_PTR, 0);
 
-    for(int i=0; i<size; i++)          lora_write_reg(E_LORA_REG_FIFO, *buf++);
+    for(int i=0; res == ESP_OK && i<size; i++)
+        res = lora_write_reg(E_LORA_REG_FIFO, *buf_ptr++);
 
-    lora_write_reg(E_LORA_REG_PAYLOAD_LENGTH, size);
+    res = res ?: lora_write_reg(E_LORA_REG_PAYLOAD_LENGTH, size);
 
     /*
      * Start transmission and wait for conclusion.
      */
-    lora_write_reg(E_LORA_REG_OP_MODE, E_LORA_MODE_LONG_RANGE_MODE | E_LORA_MODE_TX);
-    while((lora_read_reg(E_LORA_REG_IRQ_FLAGS) & E_LORA_IRQ_TX_DONE_MASK) == 0)          vTaskDelay(2);
+    res = res ?: lora_write_reg(E_LORA_REG_OP_MODE, E_LORA_MODE_LONG_RANGE_MODE | E_LORA_MODE_TX);
+    uint8_t val;
+    if (res == ESP_OK) {
+        while ((res = lora_read_reg(E_LORA_REG_IRQ_FLAGS, &val) == ESP_OK
+           && (val & E_LORA_IRQ_TX_DONE_MASK)) == 0)
+            vTaskDelay(2);
+    }
 
-    lora_write_reg(E_LORA_REG_IRQ_FLAGS, E_LORA_IRQ_TX_DONE_MASK);
+    res = res ?: lora_write_reg(E_LORA_REG_IRQ_FLAGS, E_LORA_IRQ_TX_DONE_MASK);
+    return res;
 }
 
 /**
  * Read a received packet.
  * @param buf Buffer for the data.
  * @param size Available size in buffer (bytes).
- * @return Number of bytes received (zero if no packet available).
+ * @param received[out] Number of bytes received (zero if no packet available).
+ * @return error code.
  */
-int lora_receive_packet(uint8_t *buf, int size) {
-    int len = 0;
+esp_err_t lora_receive_packet(void *buf, unsigned size, unsigned *received) {
+    unsigned len = 0;
+    uint8_t *buf_ptr = buf;
+    *received = 0;
 
     /*
      * Check interrupts.
      */
-    int irq = lora_read_reg(E_LORA_REG_IRQ_FLAGS);
-    lora_write_reg(E_LORA_REG_IRQ_FLAGS, irq);
-    if((irq & E_LORA_IRQ_RX_DONE_MASK) == 0) return 0;
-    if(irq & E_LORA_IRQ_PAYLOAD_CRC_ERROR_MASK) return 0;
+    uint8_t irq;
+    esp_err_t res = lora_read_reg(E_LORA_REG_IRQ_FLAGS, &irq);
+    res = res ?: lora_write_reg(E_LORA_REG_IRQ_FLAGS, irq);
+    if((irq & E_LORA_IRQ_RX_DONE_MASK) == 0)
+        return ESP_OK;
+    if(irq & E_LORA_IRQ_PAYLOAD_CRC_ERROR_MASK)
+        return ESP_OK;
 
     /*
      * Find packet size.
      */
-    if (__implicit) len = lora_read_reg(E_LORA_REG_PAYLOAD_LENGTH);
-    else len = lora_read_reg(E_LORA_REG_RX_NB_BYTES);
+    lora_esp32_register src = __implicit ? E_LORA_REG_PAYLOAD_LENGTH : E_LORA_REG_RX_NB_BYTES;
+    uint8_t llen; // TODO: what about > 256 byte buffer ?
+    res = res ?: lora_read_reg(src, &llen);
+    len = llen;
 
     /*
      * Transfer data from radio.
      */
-    lora_idle();
-    lora_write_reg(E_LORA_REG_FIFO_ADDR_PTR, lora_read_reg(E_LORA_REG_FIFO_RX_CURRENT_ADDR));
-    if(len > size) len = size;
-    for(int i=0; i<len; i++)          *buf++ = lora_read_reg(E_LORA_REG_FIFO);
+    res = res ?: lora_idle();
+    uint8_t val;
+    res = res ?: lora_read_reg(E_LORA_REG_FIFO_RX_CURRENT_ADDR, &val);
+    res = res ?: lora_write_reg(E_LORA_REG_FIFO_ADDR_PTR, val);
+    if(len > size)
+        len = size;
 
-    return len;
+    for(int i=0; res == ESP_OK && i<len; i++)
+        res = lora_read_reg(E_LORA_REG_FIFO, buf_ptr++);
+
+    *received = len;
+    return res;
 }
 
 /**
  * Returns non-zero if there is data to read (packet received).
  */
-int lora_received(void) {
-    if(lora_read_reg(E_LORA_REG_IRQ_FLAGS) & E_LORA_IRQ_RX_DONE_MASK) return 1;
-    return 0;
+esp_err_t lora_received(bool *has_data) {
+    uint8_t val = 0;
+    esp_err_t res = lora_read_reg(E_LORA_REG_IRQ_FLAGS, &val);
+    *has_data = val & E_LORA_IRQ_RX_DONE_MASK;
+    return res;
 }
 
 /**
  * Return last packet's RSSI.
  */
-int lora_packet_rssi(void) {
-    return (lora_read_reg(E_LORA_REG_PKT_RSSI_VALUE) - (__frequency < 868E6 ? 164 : 157));
+esp_err_t lora_packet_rssi(int *rssi) {
+    uint8_t val = 0;
+    esp_err_t res = lora_read_reg(E_LORA_REG_PKT_RSSI_VALUE, &val);
+    *rssi =  (val - (__frequency < 868E6 ? 164 : 157));
+    return res;
 }
 
 /**
  * Return last packet's SNR (signal to noise ratio).
  */
-double lora_packet_snr(void) {
-    return (double)(lora_read_reg(E_LORA_REG_PKT_SNR_VALUE)) * 0.25;
+esp_err_t lora_packet_snr(double *snr) {
+    uint8_t val;
+    esp_err_t res = lora_read_reg(E_LORA_REG_PKT_SNR_VALUE, &val);
+    *snr = (double)(val) * 0.25;
+    return res;
 }
 
 /**
  * Shutdown hardware.
  */
-void lora_close(void) {
-    lora_sleep();
+esp_err_t lora_close(void) {
+    return lora_sleep();
 //   close(__spi);  FIXME: end hardware features after lora_close
 //   close(__cs);
 //   close(__rst);
@@ -454,7 +514,9 @@ void lora_dump_registers(void) {
     int i;
     printf("00 01 02 03 04 05 06 07 08 09 0A 0B 0C 0D 0E 0F\n");
     for(i=0; i<0x40; i++) {
-        printf("%02X ", lora_read_reg(i));
+        uint8_t reg;
+        lora_read_reg(i, &reg);
+        printf("%02X ", reg);
         if((i & 0x0f) == 0x0f) printf("\n");
     }
     printf("\n");

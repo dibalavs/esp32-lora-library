@@ -110,27 +110,26 @@ typedef struct {
 
 esp_err_t lora_init(lora_esp32_param_t params);
 void lora_reset();
-void lora_explicit_header_mode();
-void lora_implicit_header_mode(uint8_t size);
-void lora_idle();
-void lora_sleep();
-void lora_receive();
-void lora_set_tx_power(lora_esp32_power_level level);
-void lora_set_frequency(long frequency);
-void lora_set_spreading_factor(lora_esp32_spreading_factor sf);
-void lora_set_bandwidth(lora_esp32_bandwidth sbw);
-void lora_set_coding_rate(lora_esp32_coding_rate denominator);
-void lora_set_preamble_length(long length);
-void lora_set_sync_word(int sw);
-void lora_enable_crc();
-void lora_disable_crc();
-void lora_send_packet(uint8_t *buf, int size);
-int lora_receive_packet(uint8_t *buf, int size);
-int lora_received();
-int lora_packet_rssi();
-double lora_packet_snr();
-void lora_close();
-int lora_initialized();
+esp_err_t lora_explicit_header_mode();
+esp_err_t lora_implicit_header_mode(uint8_t size);
+esp_err_t lora_idle();
+esp_err_t lora_sleep();
+esp_err_t lora_receive();
+esp_err_t lora_set_tx_power(lora_esp32_power_level level, bool use_boost);
+esp_err_t lora_set_frequency(long frequency);
+esp_err_t lora_set_spreading_factor(lora_esp32_spreading_factor sf);
+esp_err_t lora_set_bandwidth(lora_esp32_bandwidth sbw);
+esp_err_t lora_set_coding_rate(lora_esp32_coding_rate denominator);
+esp_err_t lora_set_preamble_length(long length);
+esp_err_t lora_set_sync_word(int sw);
+esp_err_t lora_enable_crc();
+esp_err_t lora_disable_crc();
+esp_err_t lora_send_packet(const void *buf, unsigned size);
+esp_err_t lora_receive_packet(void *buf, unsigned size, unsigned *received);
+esp_err_t lora_received(bool *has_data);
+esp_err_t lora_packet_rssi(int *rssi);
+esp_err_t lora_packet_snr(double *snr);
+esp_err_t lora_close();
 void lora_dump_registers();
 
 #if defined(__cplusplus)
