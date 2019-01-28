@@ -9,7 +9,6 @@
 
 #include "lora.h"
 
-
 static spi_device_handle_t spi_device_handle;
 static lora_esp32_param_t esp32_param;
 static const char* TAG = "lora-esp32";
@@ -409,13 +408,18 @@ esp_err_t lora_send_packet(const void *buf, unsigned size) {
      */
     res = res ?: lora_write_reg(E_LORA_REG_OP_MODE, E_LORA_MODE_LONG_RANGE_MODE | E_LORA_MODE_TX);
     uint8_t val;
-    if (res == ESP_OK) {
-        while ((res = lora_read_reg(E_LORA_REG_IRQ_FLAGS, &val) == ESP_OK
-           && (val & E_LORA_IRQ_TX_DONE_MASK)) == 0)
-            vTaskDelay(2);
+
+    while (res == ESP_OK) {
+        res = lora_read_reg(E_LORA_REG_IRQ_FLAGS, &val);
+        if (res == ESP_OK && (val & E_LORA_IRQ_TX_DONE_MASK)) {
+            break;
+        }
+
+        vTaskDelay(2);
     }
 
     res = res ?: lora_write_reg(E_LORA_REG_IRQ_FLAGS, E_LORA_IRQ_TX_DONE_MASK);
+
     return res;
 }
 
