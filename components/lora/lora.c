@@ -1,8 +1,11 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include <freertos/event_groups.h>
 #include "esp_system.h"
+#include "esp_sleep.h"
 #include "driver/spi_master.h"
+#include "driver/uart.h"
 #include "soc/gpio_struct.h"
 #include "driver/gpio.h"
 #include "esp_log.h"
@@ -11,6 +14,7 @@
 
 static spi_device_handle_t spi_device_handle;
 static lora_esp32_param_t esp32_param;
+static EventGroupHandle_t wait_event_group;
 static const char* TAG = "lora-esp32";
 
 typedef enum {
@@ -40,29 +44,29 @@ typedef enum {
     E_LORA_REG_DETECTION_THRESHOLD = 0x37,
     E_LORA_REG_SYNC_WORD = 0x39,
     E_LORA_REG_DIO_MAPPING_1 = 0x40,
+    E_LORA_REG_DIO_MAPPING_2 = 0x41,
     E_LORA_REG_VERSION = 0x42,
 } lora_esp32_register;
 
 typedef enum {
     E_LORA_MODE_LONG_RANGE_MODE = 0x80,
-    E_LORA_MODE_SLEEP = 0x00,
-    E_LORA_MODE_STDBY = 0x01,
-    E_LORA_MODE_TX = 0x03,
-    E_LORA_MODE_RX_CONTINUOUS = 0x05,
-    E_LORA_MODE_RX_SINGLE = 0x06,
+    E_LORA_MODE_SLEEP           = 0x00,
+    E_LORA_MODE_STDBY           = 0x01,
+    E_LORA_MODE_TX              = 0x03,
+    E_LORA_MODE_RX_CONTINUOUS   = 0x05,
+    E_LORA_MODE_RX_SINGLE       = 0x06,
 } lora_esp32_transceiver_mode;
 
 typedef enum {
-E_LORA_IRQ_TX_DONE_MASK = 0x08,
-E_LORA_IRQ_PAYLOAD_CRC_ERROR_MASK = 0x20,
-E_LORA_IRQ_RX_DONE_MASK = 0x40,
+    E_LORA_IRQ_TX_DONE_MASK           = 0x08,
+    E_LORA_IRQ_PAYLOAD_CRC_ERROR_MASK = 0x20,
+    E_LORA_IRQ_RX_DONE_MASK           = 0x40,
 } lora_esp32_irq_mask;
 
 /*
  * PA configuration
  */
 #define PA_BOOST                       0x80
-
 
 #define PA_OUTPUT_RFO_PIN              0
 #define PA_OUTPUT_PA_BOOST_PIN         1
@@ -71,6 +75,12 @@ E_LORA_IRQ_RX_DONE_MASK = 0x40,
 
 static int __implicit;
 static long __frequency;
+
+volatile static struct isr_flags_t {
+    bool crc_error;
+    bool rx_finished;
+    bool tx_finished;
+} irq_flags;
 
 /**
  * Write a value to a register.
@@ -83,10 +93,10 @@ esp_err_t lora_write_reg(lora_esp32_register reg, uint8_t val) {
     uint8_t in[2];
 
     spi_transaction_t t = {
-            .flags = 0,
-            .length = 16,
-            .tx_buffer = out,
-            .rx_buffer = in
+        .flags = 0,
+        .length = 2 * CHAR_BIT,
+        .tx_buffer = out,
+        .rx_buffer = in
     };
 
     gpio_set_level(esp32_param.cs, 0);
@@ -108,7 +118,7 @@ esp_err_t lora_read_reg(lora_esp32_register reg, uint8_t *val) {
 
     spi_transaction_t t = {
             .flags = 0,
-            .length = 16,
+            .length = 2 * CHAR_BIT,
             .tx_buffer = out,
             .rx_buffer = in
     };
@@ -117,6 +127,106 @@ esp_err_t lora_read_reg(lora_esp32_register reg, uint8_t *val) {
     esp_err_t res = spi_device_transmit(spi_device_handle, &t);
     gpio_set_level(esp32_param.cs, 1);
     *val = in[1];
+    return res;
+}
+
+static void IRAM_ATTR gpio_isr_handler(void* arg)
+{
+    (void)arg;
+    ESP_ERROR_CHECK(gpio_intr_disable(esp32_param.intr));
+
+    BaseType_t xHigherPriorityTaskWoken, xResult;
+    xHigherPriorityTaskWoken = pdFALSE;
+    xResult = xEventGroupSetBitsFromISR(wait_event_group, BIT0, &xHigherPriorityTaskWoken);
+    if (xResult == pdPASS) {
+        portYIELD_FROM_ISR();
+    }
+}
+
+static esp_err_t lora_set_dio(bool is_rx)
+{
+    uint8_t reg1 = is_rx ? 0 : 0x55; // b01010101
+    uint8_t reg2 = is_rx ? 0 : 0x50; // b01010000
+    esp_err_t res = lora_write_reg(E_LORA_REG_DIO_MAPPING_1, reg1);
+    return res ?: lora_write_reg(E_LORA_REG_DIO_MAPPING_2, reg2);
+}
+
+static esp_err_t lora_fetch_irq_status()
+{
+    uint8_t irq;
+    esp_err_t res = lora_read_reg(E_LORA_REG_IRQ_FLAGS, &irq);
+    res = res ?: lora_write_reg(E_LORA_REG_IRQ_FLAGS, irq);
+
+    irq_flags.crc_error = !! (irq & E_LORA_IRQ_PAYLOAD_CRC_ERROR_MASK);
+    irq_flags.rx_finished = !! (irq & E_LORA_IRQ_RX_DONE_MASK);
+    irq_flags.tx_finished = !! (irq & E_LORA_IRQ_TX_DONE_MASK);
+    return res;
+}
+
+static esp_err_t lora_wait_operation(bool is_read, uint64_t timeout_us)
+{
+    esp_err_t res = ESP_OK;
+    EventBits_t bits;
+    esp_sleep_wakeup_cause_t cause;
+    volatile bool *txrx_finish = is_read ? &irq_flags.rx_finished : &irq_flags.tx_finished;
+
+    irq_flags.crc_error = false;
+    irq_flags.rx_finished = false;
+    irq_flags.tx_finished = false;
+
+    res = lora_set_dio(is_read);
+    if (res != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to set DIO mapping:%d", res);
+        return res;
+    }
+
+    if (timeout_us == LORA_TIMEOUT_NOWAIT) {
+        return lora_fetch_irq_status();
+    }
+
+    if (esp32_param.wait == E_LORA_WAIT_IDLE) {
+        xEventGroupClearBits(wait_event_group, BIT0);
+        ESP_ERROR_CHECK(gpio_intr_enable(esp32_param.intr));
+    }
+
+    while (!(*txrx_finish) && res == ESP_OK) {
+        switch (esp32_param.wait) {
+        case E_LORA_WAIT_LIGHT_SLEEP:
+            if (timeout_us != LORA_TIMEOUT_INFINITY) {
+                ESP_ERROR_CHECK(esp_sleep_enable_timer_wakeup(timeout_us));
+            }
+
+            ESP_ERROR_CHECK(esp_light_sleep_start());
+            cause = esp_sleep_get_wakeup_cause();
+            if (cause == ESP_SLEEP_WAKEUP_TIMER) {
+                res = ESP_ERR_TIMEOUT;
+                goto out;
+            }
+            break;
+        case E_LORA_WAIT_IDLE:
+            bits = xEventGroupWaitBits(wait_event_group,
+                BIT0,
+                true,  // clear on exit
+                false, // wait all
+                (timeout_us == LORA_TIMEOUT_INFINITY ? (TickType_t) - 1 : pdMS_TO_TICKS(timeout_us / 1000)));
+            if (bits == 0) {
+                res = ESP_ERR_TIMEOUT;
+                goto out;
+            }
+            break;
+        case E_LORA_WAIT_POLL:
+            vTaskDelay(2);
+            // TODO: add timeout support.
+        }
+
+        res = lora_fetch_irq_status();
+    }
+
+out:
+    if (esp32_param.wait == E_LORA_WAIT_IDLE) {
+        ESP_ERROR_CHECK(gpio_intr_disable(esp32_param.intr));
+    }
+
     return res;
 }
 
@@ -176,7 +286,7 @@ esp_err_t lora_sleep(void) {
  * Sets the radio transceiver in receive mode.
  * Incoming packets will be received.
  */
-esp_err_t lora_receive(void) {
+esp_err_t lora_set_receive_mode(void) {
     return lora_write_reg(E_LORA_REG_OP_MODE, E_LORA_MODE_LONG_RANGE_MODE | E_LORA_MODE_RX_CONTINUOUS);
 }
 
@@ -296,7 +406,12 @@ esp_err_t lora_init(lora_esp32_param_t params) {
     }
 
     if(esp32_param.rst == ESP32_HAL_UNDEFINED) {
-        ESP_LOGW(TAG, "RESET pin is not configured. reset function is disabled");
+        ESP_LOGE(TAG, "RESET pin is not configured. reset function is disabled");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (esp32_param.intr == ESP32_HAL_UNDEFINED && esp32_param.wait != E_LORA_WAIT_POLL) {
+        ESP_LOGE(TAG, "Interrupt pin configured incorrectly");
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -340,9 +455,36 @@ esp_err_t lora_init(lora_esp32_param_t params) {
      * Configure CPU hardware to communicate with the radio chip
      */
     gpio_pad_select_gpio(esp32_param.rst);
-    gpio_set_direction(esp32_param.rst, GPIO_MODE_OUTPUT);
+    ESP_ERROR_CHECK(gpio_set_direction(esp32_param.rst, GPIO_MODE_OUTPUT));
     gpio_pad_select_gpio(esp32_param.cs);
-    gpio_set_direction(esp32_param.cs, GPIO_MODE_OUTPUT);
+    ESP_ERROR_CHECK(gpio_set_direction(esp32_param.cs, GPIO_MODE_OUTPUT));
+
+    gpio_config_t io_conf;
+    io_conf.intr_type = (gpio_int_type_t)GPIO_INTR_DISABLE;
+    io_conf.pin_bit_mask = 1 << esp32_param.intr;
+    io_conf.mode = GPIO_MODE_INPUT;
+    io_conf.pull_up_en = 0;
+    io_conf.pull_down_en = 0;
+    ESP_ERROR_CHECK(gpio_config(&io_conf));
+
+    // Configure interrupt handling.
+    if (esp32_param.intr != ESP32_HAL_UNDEFINED) {
+        switch (esp32_param.wait) {
+        case E_LORA_WAIT_LIGHT_SLEEP:
+            ESP_ERROR_CHECK(gpio_wakeup_enable(esp32_param.intr, GPIO_INTR_HIGH_LEVEL));
+            ESP_ERROR_CHECK(esp_sleep_enable_gpio_wakeup());
+            break;
+        case E_LORA_WAIT_IDLE:
+            wait_event_group = xEventGroupCreate();
+            ESP_ERROR_CHECK(gpio_intr_disable(esp32_param.intr));
+            ESP_ERROR_CHECK(gpio_set_intr_type(esp32_param.intr, GPIO_INTR_HIGH_LEVEL));
+            ESP_ERROR_CHECK(gpio_isr_handler_add(esp32_param.intr, gpio_isr_handler, 0));
+            break;
+        case E_LORA_WAIT_POLL:
+            break;
+        }
+
+    }
 
     /*
      * Perform hardware reset.
@@ -382,6 +524,7 @@ esp_err_t lora_init(lora_esp32_param_t params) {
     ret = ret ?: lora_set_tx_power(params.tx_power, false);
 
     ret = ret ?: lora_idle();
+
     return ret;
 }
 
@@ -390,36 +533,18 @@ esp_err_t lora_init(lora_esp32_param_t params) {
  * @param buf Data to be sent
  * @param size Size of data.
  */
-esp_err_t lora_send_packet(const void *buf, unsigned size) {
-    /*
-     * Transfer data to radio.
-     */
+esp_err_t lora_send_packet(const void *buf, unsigned size, uint64_t timeout_us) {
     const uint8_t *buf_ptr = buf;
     esp_err_t res = lora_idle();
+
     res = res ?: lora_write_reg(E_LORA_REG_FIFO_ADDR_PTR, 0);
 
-    for(int i=0; res == ESP_OK && i<size; i++)
+    for(int i=0; res == ESP_OK && i < size; i++)
         res = lora_write_reg(E_LORA_REG_FIFO, *buf_ptr++);
 
     res = res ?: lora_write_reg(E_LORA_REG_PAYLOAD_LENGTH, size);
-
-    /*
-     * Start transmission and wait for conclusion.
-     */
     res = res ?: lora_write_reg(E_LORA_REG_OP_MODE, E_LORA_MODE_LONG_RANGE_MODE | E_LORA_MODE_TX);
-    uint8_t val;
-
-    while (res == ESP_OK) {
-        res = lora_read_reg(E_LORA_REG_IRQ_FLAGS, &val);
-        if (res == ESP_OK && (val & E_LORA_IRQ_TX_DONE_MASK)) {
-            break;
-        }
-
-        vTaskDelay(2);
-    }
-
-    res = res ?: lora_write_reg(E_LORA_REG_IRQ_FLAGS, E_LORA_IRQ_TX_DONE_MASK);
-
+    res = res ?: lora_wait_operation(/*is_read*/ false, timeout_us);
     return res;
 }
 
@@ -430,54 +555,31 @@ esp_err_t lora_send_packet(const void *buf, unsigned size) {
  * @param received[out] Number of bytes received (zero if no packet available).
  * @return error code.
  */
-esp_err_t lora_receive_packet(void *buf, unsigned size, unsigned *received) {
-    unsigned len = 0;
+esp_err_t lora_receive_packet(void *buf, unsigned size, unsigned *received, uint64_t timeout_us) {
+    esp_err_t res;
     uint8_t *buf_ptr = buf;
     *received = 0;
 
-    /*
-     * Check interrupts.
-     */
-    uint8_t irq;
-    esp_err_t res = lora_read_reg(E_LORA_REG_IRQ_FLAGS, &irq);
-    res = res ?: lora_write_reg(E_LORA_REG_IRQ_FLAGS, irq);
-    if((irq & E_LORA_IRQ_RX_DONE_MASK) == 0)
-        return ESP_OK;
-    if(irq & E_LORA_IRQ_PAYLOAD_CRC_ERROR_MASK)
-        return ESP_OK;
+    do {
+        res = lora_wait_operation(/*is_read*/ true, timeout_us);
+        if (res == ESP_ERR_TIMEOUT || !irq_flags.rx_finished) {
+            return res;
+        }
+    } while (irq_flags.crc_error);
 
-    /*
-     * Find packet size.
-     */
-    lora_esp32_register src = __implicit ? E_LORA_REG_PAYLOAD_LENGTH : E_LORA_REG_RX_NB_BYTES;
-    uint8_t llen; // TODO: what about > 256 byte buffer ?
-    res = res ?: lora_read_reg(src, &llen);
-    len = llen;
+    lora_esp32_register reg = __implicit ? E_LORA_REG_PAYLOAD_LENGTH : E_LORA_REG_RX_NB_BYTES;
+    uint8_t llen;
+    res = res ?: lora_read_reg(reg, &llen);
+    *received = (llen > size ? size : llen);
 
-    /*
-     * Transfer data from radio.
-     */
     res = res ?: lora_idle();
     uint8_t val;
     res = res ?: lora_read_reg(E_LORA_REG_FIFO_RX_CURRENT_ADDR, &val);
     res = res ?: lora_write_reg(E_LORA_REG_FIFO_ADDR_PTR, val);
-    if(len > size)
-        len = size;
 
-    for(int i=0; res == ESP_OK && i<len; i++)
+    for(int i = 0; res == ESP_OK && i < *received; i++)
         res = lora_read_reg(E_LORA_REG_FIFO, buf_ptr++);
 
-    *received = len;
-    return res;
-}
-
-/**
- * Returns non-zero if there is data to read (packet received).
- */
-esp_err_t lora_received(bool *has_data) {
-    uint8_t val = 0;
-    esp_err_t res = lora_read_reg(E_LORA_REG_IRQ_FLAGS, &val);
-    *has_data = val & E_LORA_IRQ_RX_DONE_MASK;
     return res;
 }
 
@@ -505,13 +607,17 @@ esp_err_t lora_packet_snr(double *snr) {
  * Shutdown hardware.
  */
 esp_err_t lora_close(void) {
+    if (esp32_param.wait == E_LORA_WAIT_IDLE) {
+        ESP_ERROR_CHECK(gpio_set_intr_type(esp32_param.intr, GPIO_INTR_DISABLE));
+        ESP_ERROR_CHECK(gpio_isr_handler_remove(esp32_param.intr));
+        ESP_ERROR_CHECK(gpio_intr_disable(esp32_param.intr));
+        vEventGroupDelete(wait_event_group);
+    }
+
     return lora_sleep();
 //   close(__spi);  FIXME: end hardware features after lora_close
 //   close(__cs);
 //   close(__rst);
-//   __spi = -1;
-//   __cs = -1;
-//   __rst = -1;
 }
 
 void lora_dump_registers(void) {
@@ -525,4 +631,3 @@ void lora_dump_registers(void) {
     }
     printf("\n");
 }
-
