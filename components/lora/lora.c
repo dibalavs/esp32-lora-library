@@ -522,7 +522,7 @@ esp_err_t lora_init(lora_esp32_param_t params) {
     ret = ret ?: lora_write_reg(E_LORA_REG_LNA, val | (uint8_t)0x03);
     ret = ret ?: lora_write_reg(E_LORA_REG_MODEM_CONFIG_3, 0x04);
     ret = ret ?: lora_set_tx_power(params.tx_power, false);
-
+    ret = ret ?: esp32_param.crc_enabled ? lora_enable_crc() : lora_disable_crc();
     ret = ret ?: lora_idle();
 
     return ret;
