@@ -173,7 +173,6 @@ static esp_err_t lora_wait_operation(bool is_read, uint64_t timeout_us)
     irq_flags.crc_error = false;
     irq_flags.rx_finished = false;
     irq_flags.tx_finished = false;
-
     res = lora_set_dio(is_read);
     if (res != ESP_OK) {
         ESP_LOGE(TAG, "Failed to set DIO mapping:%d", res);
@@ -200,6 +199,11 @@ static esp_err_t lora_wait_operation(bool is_read, uint64_t timeout_us)
             cause = esp_sleep_get_wakeup_cause();
             if (cause == ESP_SLEEP_WAKEUP_TIMER) {
                 res = ESP_ERR_TIMEOUT;
+                goto out;
+            }
+            if (cause != ESP_SLEEP_WAKEUP_GPIO) {
+                ESP_LOGE(TAG, "Invalid wake up reason:%d", cause);
+                res = ESP_FAIL;
                 goto out;
             }
             break;
@@ -607,6 +611,7 @@ esp_err_t lora_packet_snr(double *snr) {
  * Shutdown hardware.
  */
 esp_err_t lora_close(void) {
+    esp_err_t res = lora_sleep();
     if (esp32_param.wait == E_LORA_WAIT_IDLE) {
         ESP_ERROR_CHECK(gpio_set_intr_type(esp32_param.intr, GPIO_INTR_DISABLE));
         ESP_ERROR_CHECK(gpio_isr_handler_remove(esp32_param.intr));
@@ -614,7 +619,7 @@ esp_err_t lora_close(void) {
         vEventGroupDelete(wait_event_group);
     }
 
-    return lora_sleep();
+    return res;
 //   close(__spi);  FIXME: end hardware features after lora_close
 //   close(__cs);
 //   close(__rst);
