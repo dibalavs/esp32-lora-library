@@ -29,6 +29,7 @@ typedef enum {
     E_LORA_REG_FIFO_TX_BASE_ADDR = 0x0e,
     E_LORA_REG_FIFO_RX_BASE_ADDR = 0x0f,
     E_LORA_REG_FIFO_RX_CURRENT_ADDR = 0x10,
+    E_LORA_REG_IRQ_MASK = 0x11,
     E_LORA_REG_IRQ_FLAGS = 0x12,
     E_LORA_REG_RX_NB_BYTES = 0x13,
     E_LORA_REG_PKT_SNR_VALUE = 0x19,
@@ -59,6 +60,7 @@ typedef enum {
 
 typedef enum {
     E_LORA_IRQ_TX_DONE_MASK           = 0x08,
+    E_LORA_IRQ_VALID_HEADER_MASK      = 0x10,
     E_LORA_IRQ_PAYLOAD_CRC_ERROR_MASK = 0x20,
     E_LORA_IRQ_RX_DONE_MASK           = 0x40,
 } lora_esp32_irq_mask;
@@ -189,6 +191,10 @@ static esp_err_t lora_wait_operation(bool is_read, uint64_t timeout_us)
     }
 
     while (!(*txrx_finish) && res == ESP_OK) {
+        if (is_read) {
+            res = res ?: lora_write_reg(E_LORA_REG_FIFO_ADDR_PTR, 0);
+        }
+
         switch (esp32_param.wait) {
         case E_LORA_WAIT_LIGHT_SLEEP:
             if (timeout_us != LORA_TIMEOUT_INFINITY) {
@@ -219,8 +225,13 @@ static esp_err_t lora_wait_operation(bool is_read, uint64_t timeout_us)
             }
             break;
         case E_LORA_WAIT_POLL:
-            vTaskDelay(2);
-            // TODO: add timeout support.
+            vTaskDelay(pdMS_TO_TICKS(10));
+            if (timeout_us != LORA_TIMEOUT_INFINITY && timeout_us >= 10000) {
+                timeout_us -= 10000;
+            } else if (timeout_us < 10000) {
+                res = ESP_ERR_TIMEOUT;
+                goto out;
+            }
         }
 
         res = lora_fetch_irq_status();
@@ -284,14 +295,6 @@ esp_err_t lora_idle(void) {
  */
 esp_err_t lora_sleep(void) {
     return lora_write_reg(E_LORA_REG_OP_MODE, E_LORA_MODE_LONG_RANGE_MODE | E_LORA_MODE_SLEEP);
-}
-
-/**
- * Sets the radio transceiver in receive mode.
- * Incoming packets will be received.
- */
-esp_err_t lora_set_receive_mode(void) {
-    return lora_write_reg(E_LORA_REG_OP_MODE, E_LORA_MODE_LONG_RANGE_MODE | E_LORA_MODE_RX_CONTINUOUS);
 }
 
 /**
@@ -527,6 +530,7 @@ esp_err_t lora_init(lora_esp32_param_t params) {
     ret = ret ?: lora_write_reg(E_LORA_REG_MODEM_CONFIG_3, 0x04);
     ret = ret ?: lora_set_tx_power(params.tx_power, false);
     ret = ret ?: esp32_param.crc_enabled ? lora_enable_crc() : lora_disable_crc();
+    ret = ret ?: lora_write_reg(E_LORA_REG_IRQ_MASK, E_LORA_IRQ_VALID_HEADER_MASK);
     ret = ret ?: lora_idle();
 
     return ret;
@@ -542,6 +546,7 @@ esp_err_t lora_send_packet(const void *buf, unsigned size, uint64_t timeout_us) 
     esp_err_t res = lora_idle();
 
     res = res ?: lora_write_reg(E_LORA_REG_FIFO_ADDR_PTR, 0);
+    res = res ?: lora_write_reg(E_LORA_REG_PAYLOAD_LENGTH, 0);
 
     for(int i=0; res == ESP_OK && i < size; i++)
         res = lora_write_reg(E_LORA_REG_FIFO, *buf_ptr++);
@@ -563,6 +568,13 @@ esp_err_t lora_receive_packet(void *buf, unsigned size, unsigned *received, uint
     esp_err_t res;
     uint8_t *buf_ptr = buf;
     *received = 0;
+
+    res = lora_idle();
+    res = res ?: lora_write_reg(E_LORA_REG_OP_MODE, E_LORA_MODE_LONG_RANGE_MODE | E_LORA_MODE_RX_CONTINUOUS);
+    if (res != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to set receive mode: 0x%x", res);
+        return res;
+    }
 
     do {
         res = lora_wait_operation(/*is_read*/ true, timeout_us);

@@ -136,7 +136,6 @@ esp_err_t lora_explicit_header_mode();
 esp_err_t lora_implicit_header_mode(uint8_t size);
 esp_err_t lora_idle();
 esp_err_t lora_sleep();
-esp_err_t lora_set_receive_mode();
 esp_err_t lora_set_tx_power(lora_esp32_power_level level, bool use_boost);
 esp_err_t lora_set_frequency(long frequency);
 esp_err_t lora_set_spreading_factor(lora_esp32_spreading_factor sf);
